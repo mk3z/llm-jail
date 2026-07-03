@@ -29,6 +29,7 @@ pkgs.writeShellApplication {
     DANGEROUS=0
     DEV_ENV=0
     IMMUTABLE=0
+    SAME_PATH=0
     LLMJAIL_TMPDIR=''${TMPDIR:-/tmp}
     STORE_DISK=0
     CONFIG_DIR="''${LLMJAIL_CONFIG_DIR:-$HOME/${toolDefaults.configDirName}}"
@@ -47,9 +48,16 @@ pkgs.writeShellApplication {
       --dangerous           Enable the tool's dangerous / unattended mode
       --config-dir PATH     Tool config directory (default: ~/${toolDefaults.configDirName})
       --immutable           Mount workspace as read-only instead of read-write
+      --same-path           Mount workspace at its host path instead of /workspace
+                             (lets tools like 'claude --resume' match sessions
+                             started outside the sandbox)
       --tmpdir PATH         Directory to use for runtime data (default: ''${TMPDIR:-/tmp})
-      --mount PATH          Extra read-write mount at same path in guest (repeatable)
-      --ro-mount PATH       Extra read-only mount at same path in guest (repeatable)
+      --mount HOSTPATH[:GUESTPATH]
+                             Extra read-write mount (repeatable). GUESTPATH
+                             defaults to HOSTPATH if omitted.
+      --ro-mount HOSTPATH[:GUESTPATH]
+                             Extra read-only mount (repeatable). GUESTPATH
+                             defaults to HOSTPATH if omitted.
       --mask GLOB           Mask paths matching GLOB in workspace/mounts (repeatable).
                             GLOB with '/' uses -path "<root>/GLOB" (matches across
                             subdirs, e.g. 'a/*' also hits 'a/b/c'); else -name GLOB.
@@ -92,6 +100,7 @@ pkgs.writeShellApplication {
         --ro-mount)    EXTRA_MOUNTS+=("$2:ro"); shift 2 ;;
         --tmpdir)      LLMJAIL_TMPDIR="$2"; shift 2 ;;
         --immutable)    IMMUTABLE=1; shift ;;
+        --same-path)   SAME_PATH=1; shift ;;
         --allow-domain)  EXTRA_DOMAINS+=("$2"); shift 2 ;;
         --no-net-filter) NET_FILTER=0; shift ;;
         --mask)        MASK_PATTERNS+=("$2"); shift 2 ;;
@@ -199,6 +208,12 @@ pkgs.writeShellApplication {
     }
     CLEANUP_FUNCS+=(cleanup_winch)
 
+    # ── Resolve workspace path ─────────────────────────────────────────
+    WORKSPACE_DIR="/workspace"
+    if [[ "$SAME_PATH" -eq 1 ]]; then
+      WORKSPACE_DIR="$(pwd)"
+    fi
+
     # ── Write env file ────────────────────────────────────────────────
     ENV_FILE="$RUNDIR/env"
     {
@@ -238,6 +253,7 @@ pkgs.writeShellApplication {
 
       echo "HOME=/home/user"
       echo "LLMJAIL_DANGEROUS=$DANGEROUS"
+      echo "WORKSPACE_DIR=\"$WORKSPACE_DIR\""
     } > "$ENV_FILE"
 
     # Write tool args as null-separated file to preserve argument boundaries
@@ -315,14 +331,14 @@ pkgs.writeShellApplication {
     # Default mounts
     validate_path "$(pwd)" "workspace path"
     if [[ "$IMMUTABLE" -eq 1 ]]; then
-      add_mount "$(pwd)" "/workspace" "ro-nocache"
+      add_mount "$(pwd)" "$WORKSPACE_DIR" "ro-nocache"
     else
-      add_mount "$(pwd)" "/workspace" "rw"
+      add_mount "$(pwd)" "$WORKSPACE_DIR" "rw"
       if [[ -d "$(pwd)/.git/hooks" ]]; then
-        add_mount "$(pwd)/.git/hooks" "/workspace/.git/hooks" "ro-nocache"
+        add_mount "$(pwd)/.git/hooks" "$WORKSPACE_DIR/.git/hooks" "ro-nocache"
       fi
     fi
-    MASK_ROOTS+=("/workspace")
+    MASK_ROOTS+=("$WORKSPACE_DIR")
 
     validate_path "$CONFIG_DIR" "config directory"
     # Ensure the config dir exists even when persistDirs is empty — 9p refuses
@@ -395,15 +411,23 @@ pkgs.writeShellApplication {
     # User extra mounts
     for spec in "''${EXTRA_MOUNTS[@]+"''${EXTRA_MOUNTS[@]}"}"; do
       if [ -z "$spec" ]; then continue; fi
-      hostpath="''${spec%:*}"
       mode="''${spec##*:}"
+      paths="''${spec%:*}"
+      if [[ "$paths" == *:* ]]; then
+        hostpath="''${paths%%:*}"
+        guestpath="''${paths#*:}"
+      else
+        hostpath="$paths"
+        guestpath="$paths"
+      fi
       if [ ! -d "$hostpath" ]; then
         echo "ERROR: mount path does not exist or is not a directory: $hostpath" >&2
         exit 1
       fi
       validate_path "$hostpath" "mount path"
-      add_mount "$hostpath" "$hostpath" "$mode"
-      MASK_ROOTS+=("$hostpath")
+      validate_path "$guestpath" "mount path"
+      add_mount "$hostpath" "$guestpath" "$mode"
+      MASK_ROOTS+=("$guestpath")
     done
 
     # ── Mask patterns ────────────────────────────────────────────────
