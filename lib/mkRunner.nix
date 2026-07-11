@@ -89,6 +89,7 @@ pkgs.writeShellApplication {
       exit "$status"
     }
     trap cleanup EXIT
+    trap cleanup HUP INT TERM
 
     # ── Parse CLI ─────────────────────────────────────────────────────
     while [ $# -gt 0 ]; do
@@ -509,6 +510,13 @@ pkgs.writeShellApplication {
       -virtfs local,path=/nix/store,security_model=none,mount_tag=nix-store,readonly=on \
       -virtfs "local,path=$RUNDIR,security_model=none,mount_tag=envfs,readonly=on" \
       "''${VIRTFS_ARGS[@]}" \
-      "''${DISK_ARGS[@]}"
+      "''${DISK_ARGS[@]}" &
+    QEMU_PID=$!
+    cleanup_qemu() {
+      kill "$QEMU_PID" 2>/dev/null || true
+      wait "$QEMU_PID" 2>/dev/null || true
+    }
+    CLEANUP_FUNCS+=(cleanup_qemu)
+    wait "$QEMU_PID"
   '';
 }
